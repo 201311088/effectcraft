@@ -26,6 +26,7 @@ use effectcraft_project::build::Ids;
 use effectcraft_project::{Node, PropGroup};
 
 use effectcraft_effects::puppet::{MeshOpts, PinKind, mesh_group, pin_group};
+use effectcraft_keyframe::Value;
 
 use crate::import::effects::{LayerCtx, carries_nothing};
 use crate::import::props::{Kind, import_keys};
@@ -274,6 +275,10 @@ fn import_pin(
             format!("{here}: pin '{label}': its rest place on a layer taller than wide is scaled by the layer width (not sampled), it may sit elsewhere"),
         );
     }
+    // After Effects stores a Scale and a Rotation on every Deform pin, a plain Position pin too
+    // (the sample's five Position pins each carry Scale 100 and Rotation 0, keyed once). They are
+    // read into an Advanced pin first; the pin falls back to a Position pin below when neither
+    // ever leaves its neutral value.
     let (scale, rotation) = (prop(PIN_SCALE), prop(PIN_ROTATION));
     let kind = if scale.is_some() || rotation.is_some() { PinKind::Advanced } else { PinKind::Position };
     let mut g = pin_group(ids, label, kind, rest);
@@ -286,6 +291,16 @@ fn import_pin(
             import_keys(&node, k, cx.layer, &format!("{label} {id}"), cx.tm, target, col);
         } else if let Some(v) = node.static_value().and_then(|v| k.value(&v)) {
             target.value = v;
+        }
+    }
+    // A Scale that stays 100 % and a Rotation that stays 0 everywhere (static value, every key,
+    // no expression) mean the pin is a plain Position pin: an Advanced pin would hold its
+    // neighbourhood's rotation and bend the layer differently.
+    let neutral = |id: &str, n: f64| g.get(id).is_none_or(|p| p.expr.is_none() && p.value.as_f64() == n && p.keys.iter().all(|k| k.value.as_f64() == n));
+    if kind == PinKind::Advanced && neutral("scale", 100.0) && neutral("rotation", 0.0) {
+        g.children.retain(|c| c.as_prop().is_none_or(|p| p.match_id != "scale" && p.match_id != "rotation"));
+        if let Some(k) = g.get_mut("kind") {
+            k.value = Value::Enum(PinKind::Position.index());
         }
     }
     Ok(g)

@@ -112,12 +112,13 @@ fn fpms(vertices: &[[f64; 2]], triangles: &[[u32; 3]]) -> Vec<u8> {
 /// The vertices of the test mesh, in fractions of the (8 px) layer width.
 const VERTICES: [[f64; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.5, 0.25], [0.25, 0.75]];
 
-/// A Deform pin naming mesh vertex `index`, with `position` and, when `advanced`, Scale and Rotation.
-fn pin(t: &Chunk<'_>, index: f64, position: Chunk<'static>, advanced: bool) -> (&'static str, Chunk<'static>) {
+/// A Deform pin on vertex `index`; `scale_rotation` adds a static Scale (percent) and Rotation
+/// (degrees), as After Effects stores on every pin it writes.
+fn pin(t: &Chunk<'_>, index: f64, position: Chunk<'static>, scale_rotation: Option<(f64, f64)>) -> (&'static str, Chunk<'static>) {
     let mut entries = vec![("ADBE FreePin3 PosPin Vtx Index", record(t, index)), ("ADBE FreePin3 PosPin Position", position)];
-    if advanced {
-        entries.push(("ADBE FreePin3 PosPin Scale", record(t, 150.0)));
-        entries.push(("ADBE FreePin3 PosPin Rotation", record(t, 30.0)));
+    if let Some((scale, rotation)) = scale_rotation {
+        entries.push(("ADBE FreePin3 PosPin Scale", record(t, scale)));
+        entries.push(("ADBE FreePin3 PosPin Rotation", record(t, rotation)));
     }
     (POS_ATOM, group(entries))
 }
@@ -205,11 +206,13 @@ fn deform_pins_arrive_at_their_mesh_vertices() {
     let bytes = bytes_with_effect(PUPPET, |t| {
         let pins = vec![
             // Vertex 2 (0.5, 0.25 of the width): a static Position there.
-            pin(t, 2.0, record2(t, 0.5, 0.25), false),
+            pin(t, 2.0, record2(t, 0.5, 0.25), None),
             // Vertex 3 (0.25, 0.75): keyed, Advanced.
-            pin(t, 3.0, keyed2(t, &[(0, [0.25, 0.75]), (25_600, [0.5, 0.5])]), true),
+            pin(t, 3.0, keyed2(t, &[(0, [0.25, 0.75]), (25_600, [0.5, 0.5])]), Some((150.0, 30.0))),
+            // Vertex 1 (1, 0): Scale 100 and Rotation 0, a plain Position pin.
+            pin(t, 1.0, record2(t, 1.0, 0.0), Some((100.0, 0.0))),
             // No vertex 9 in a four-vertex mesh.
-            pin(t, 9.0, record2(t, 0.5, 0.5), false),
+            pin(t, 9.0, record2(t, 0.5, 0.5), None),
         ];
         let data = fpms(&VERTICES, &[[0, 1, 2], [0, 2, 3]]);
         sspc(1, Some(arap(vec![mesh(t, Some(data), pins)])), vec![("ADBE FreePin3 On Transparent", record(t, 1.0))])
@@ -227,8 +230,12 @@ fn deform_pins_arrive_at_their_mesh_vertices() {
     assert_eq!(meshes[0].get("expansion").map(|p| p.value.clone()), Some(Value::Scalar(5.0)));
 
     let pins = ec_pins(&g);
-    assert_eq!(pins.len(), 2, "the pin of a vertex outside the mesh is not made up");
-    let (a, b) = (&pins[0], &pins[1]);
+    assert_eq!(pins.len(), 3, "the pin of a vertex outside the mesh is not made up");
+    let (a, b, c) = (&pins[0], &pins[1], &pins[2]);
+    // Neutral Scale and Rotation: a Position pin, which has neither.
+    assert_eq!(vec2(c, "rest"), [8.0, 0.0]);
+    assert_eq!(c.get("kind").map(|k| k.value.clone()), Some(Value::Enum(effectcraft_effects::puppet::PinKind::Position.index())));
+    assert!(c.get("scale").is_none() && c.get("rotation").is_none());
     // Rest places: the vertex times the layer width (8 px).
     assert_eq!(vec2(a, "rest"), [4.0, 2.0]);
     assert_eq!(vec2(a, "position"), [4.0, 2.0]);
@@ -242,7 +249,7 @@ fn deform_pins_arrive_at_their_mesh_vertices() {
 
     let l = losses(&r, LossCategory::Effects, PUPPET);
     assert!(l.iter().any(|d| d.ends_with("property ADBE FreePin3 On Transparent (1) not imported")), "{l:#?}");
-    assert!(l.iter().any(|d| d.contains("pin 'Puppet Pin 3' not imported (mesh vertex 9 is not in the mesh (4 vertices))")), "{l:#?}");
+    assert!(l.iter().any(|d| d.contains("pin 'Puppet Pin 4' not imported (mesh vertex 9 is not in the mesh (4 vertices))")), "{l:#?}");
     assert!(l.iter().any(|d| d.ends_with("Deform entry ADBE FreePin3 Test Atom not imported")), "{l:#?}");
     assert!(l.iter().any(|d| d.ends_with("Stiffness 1 pin (0 keyed) [ADBE FreePin3 StarchPin Atom] not imported")), "{l:#?}");
     assert!(l.iter().any(|d| d.ends_with("entry ADBE FreePin3 Test Group not imported")), "{l:#?}");
@@ -253,7 +260,7 @@ fn deform_pins_arrive_at_their_mesh_vertices() {
 #[test]
 fn a_mesh_whose_data_is_missing_or_does_not_add_up_is_reported() {
     let bytes = bytes_with_effect(PUPPET, |t| {
-        let p = || vec![pin(t, 0.0, record2(t, 0.0, 0.0), false)];
+        let p = || vec![pin(t, 0.0, record2(t, 0.0, 0.0), None)];
         let mut short = fpms(&VERTICES, &[[0, 1, 2]]);
         short.truncate(short.len() - 6);
         let bad_index = fpms(&VERTICES, &[[0, 1, 7]]);
